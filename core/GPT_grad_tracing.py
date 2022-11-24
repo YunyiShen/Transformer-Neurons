@@ -15,16 +15,15 @@ from transformers.models.bert.modeling_bert import BertModel
 from transformers import BertModel, BertForMaskedLM, BertConfig, BertTokenizer
 from core.layer_hook_utils import featureFetcher_module
 from core.interp_utils import top_tokens_based_on_activation
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
 # Initializing a model from the bert-base-uncased style configuration
 # model = BertModel(configuration).from_pretrained('bert-base-uncased')
-model = BertForMaskedLM.from_pretrained("bert-base-uncased")
-# Accessing the model configuration
-configuration = model.config
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+model = GPT2LMHeadModel.from_pretrained("gpt2")
 model.requires_grad_(False)
 model.eval()
 #%%
-savedir = r"F:\insilico_exps\BERT_hessian"
+savedir = r"F:\insilico_exps\GPT_hessian"
 def get_causal_grad_hook(key, gradvar_store):
     def causal_grad(module, input, output):
         """Substitute the output of certain layer as a fixed representation"""
@@ -40,7 +39,7 @@ def forward_gradhook_vars(model, token_ids):
     gradvar_store = {}  # store the gradient variable, layer num as key
     hook_hs = []
     for layeri in range(12):
-        target_module = model.bert.encoder.layer[layeri]
+        target_module = model.transformer.h[layeri]
         hook_fun = get_causal_grad_hook(layeri, gradvar_store)  # get_clamp_hook(fixed_hidden_states, fix_mask)
         hook_h = target_module.register_forward_hook(hook_fun)
         hook_hs.append(hook_h)
@@ -58,23 +57,25 @@ def forward_gradhook_vars(model, token_ids):
             hook_h.remove()
         return outputs, gradvar_store
 
-text = "The Space Needle is located in downtown [MASK]."
-# text = "Vatican is located in the city of [MASK]."
+
+# text = "The Space Needle is located in downtown"
+text = "Vatican is located in the city of"
 token_ids = tokenizer.encode(text, return_tensors='pt')
 tokens = tokenizer.convert_ids_to_tokens(token_ids[0])
-mask_loc = torch.where(token_ids[0] == tokenizer.mask_token_id)[0]
+tokens = [t.replace("Ġ", "") for t in tokens]
 text_label = "-".join(text.split(" ")[:3])
 expdir = join(savedir, text_label)
 os.makedirs(expdir, exist_ok=True)
 print("Experiment dir: ", expdir)
 outputs, gradvar_store = forward_gradhook_vars(model, token_ids)
 #% Get the top token and its logit
-max_ids = torch.argmax(outputs.logits[0, mask_loc, :])
-maxlogit = outputs.logits[0, mask_loc, max_ids]
+max_ids = torch.argmax(outputs.logits[0, -1, :])
+maxlogit = outputs.logits[0, -1, max_ids]
 print(text)
-print(f"Top token is '{tokenizer.convert_ids_to_tokens(max_ids.item())}', with logit {maxlogit.item():.3f}")
+top_token = tokenizer.convert_ids_to_tokens(max_ids.item()).replace('\u0120','')
+print(f"Top token is '{top_token}', with logit {maxlogit.item():.3f}")
 torch.save(outputs, join(expdir, "model_outputs_hiddens.pt"))
-#% Compute first order gradient
+#%% Compute first order gradient
 grad_maps = torch.autograd.grad(maxlogit,
                 [*gradvar_store.values()], retain_graph=True,)  #  create_graph=True
 grad_map_tsr = torch.cat(grad_maps, dim=0)
@@ -109,13 +110,6 @@ for Hlayer in range(12):
     grad_maps_hess_all = torch.stack(grad_maps_hess_all, dim=0)
     print(grad_maps_hess_all.shape)
     torch.save(grad_maps_hess_all, join(expdir, f"hessian_map_tsr_layer{Hlayer}.pt"))
-    #  Obsolete, not efficient
-    # grad_maps_hess = []
-    # for i in tqdm(range(hiddim)):
-    #     grad_maps_part = torch.autograd.grad(grad_maps_grad[0][0, 1, i],
-    #                 gradvar_store[0], retain_graph=True, create_graph=False)  #
-    #     grad_maps_hess.append(grad_maps_part[0])
-    # grad_maps_hess = torch.stack(grad_maps_hess, dim=0)
     #%%
     """ Note on matrix norm order 
     2: matrix max singlur value norm
